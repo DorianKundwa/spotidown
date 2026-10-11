@@ -215,3 +215,8 @@ def run_server(open_browser=True):
     if open_browser:
         threading.Timer(1.0, webbrowser.open, args=(url,)).start()
     app.run(host="127.0.0.1", port=PORT, debug=False, threaded=True, use_reloader=False)
+
+
+if __name__ == "__main__":
+    run_server(open_browser="--no-browser" not in sys.argv)
+
