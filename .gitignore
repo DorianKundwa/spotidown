@@ -1,0 +1,48 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Executables
+*.exe
+
+# Audio and media files
+*.mp3
+*.m4a
+*.opus
+*.flac
+*.wav
+Spotify_Liked_Songs_MP3/
+
+# Logs and databases
+*.log
+retry_spotdl.log
+
+# Environment and virtualenvs
+.env
+.venv/
+env/
+venv/
+ENV/
+
+# Tooling and caches
+.freebuff/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor directories
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store

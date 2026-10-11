@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spotify Playlist to MP3</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div class="logo" aria-hidden="true">&#9834;</div>
+      <div>
+        <h1>Spotify Playlist to MP3</h1>
+        <p class="subtitle">Download a public playlist or a single song as tagged MP3 files, powered by spotDL.</p>
+      </div>
+      <span id="status-pill" class="pill idle">Idle</span>
+    </header>
+
+    <section class="card">
+      <label for="link" class="label">Playlist link</label>
+      <div class="input-row">
+        <input id="link" type="text" placeholder="https://open.spotify.com/playlist/... or /track/..." autocomplete="off" spellcheck="false">
+        <button id="paste" class="btn ghost" type="button">Paste</button>
+      </div>
+      <p id="hint" class="hint" aria-live="polite"></p>
+      <p class="note">Liked Songs must first be copied into a playlist.</p>
+      <p class="note">Source: track info from Spotify. Audio is matched on YouTube by spotDL.</p>
+
+      <div class="options">
+        <div class="field">
+          <label for="format" class="label">Format</label>
+          <select id="format"></select>
+        </div>
+        <div class="field">
+          <label for="template" class="label">File name</label>
+          <select id="template"></select>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button id="start" class="btn primary" type="button">Start download</button>
+        <button id="stop" class="btn danger" type="button" disabled>Stop</button>
+        <button id="open-folder" class="btn ghost" type="button">Open folder</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="progress-head">
+        <span id="progress-text">Waiting for a link</span>
+        <span id="progress-percent"></span>
+      </div>
+      <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div id="progress-fill"></div>
+      </div>
+    </section>
+
+    <section class="card log-card">
+      <div class="log-head">
+        <h2>Live log</h2>
+        <button id="clear-log" class="btn tiny ghost" type="button">Clear</button>
+      </div>
+      <div id="log" class="log" aria-live="polite"></div>
+    </section>
+
+    <footer>Saves to <code id="output-dir"></code></footer>
+  </main>
+
+  <div id="toast" class="toast" role="alert" hidden></div>
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>
