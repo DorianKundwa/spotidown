@@ -50,8 +50,9 @@ python launcher.py
 ```
 
 ### Launcher CLI Options
+- `--dynamic-port`: Dynamically request a random, open ephemeral port from the OS.
+- `--port <PORT>`: Specify a preferred port (default: `8765`). If the port is in use, the launcher automatically scans and binds to the next available open port.
 - `--no-browser`: Start the server without opening the default web browser.
-- `--port <PORT>`: Specify a custom port (default: `8765`).
-- `--check-only`: Perform environment and dependency checks without starting the server.
+- `--check-only`: Perform environment, port, and dependency checks without starting the server.
 - `--auto-install`: Automatically install any missing requirements.
 

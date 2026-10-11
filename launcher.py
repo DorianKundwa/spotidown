@@ -14,6 +14,7 @@ Features:
 import argparse
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -190,6 +191,17 @@ def check_ffmpeg():
     return False
 
 
+def is_port_in_use(port, host="127.0.0.1"):
+    """Check if a specific port is already in use."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((host, port))
+            return False
+        except OSError:
+            return True
+
+
 def main():
     ensure_python_version()
 
@@ -198,6 +210,7 @@ def main():
     parser.add_argument("--check-only", action="store_true", help="Only check requirements and exit")
     parser.add_argument("--auto-install", action="store_true", help="Automatically install missing dependencies")
     parser.add_argument("--port", type=int, default=None, help="Preferred port for backend server (default: 8765)")
+    parser.add_argument("--dynamic-port", action="store_true", help="Dynamically allocate an open port from the OS kernel")
     args = parser.parse_args()
 
     # Clear terminal title / header if on Windows
@@ -220,16 +233,30 @@ def main():
     if has_ffmpeg:
         log_ok("Audio Processor: FFmpeg detected on PATH")
 
-    if args.check_only:
-        print("\nAll pre-flight checks completed.")
-        sys.exit(0)
-
     # 2. Import application modules
     import spotify_downloader as engine
     import web_server
 
-    if args.port:
-        web_server.PREFERRED_PORT = args.port
+    # 3. Dynamic Port Discovery
+    preferred = 0 if args.dynamic_port else (args.port if args.port is not None else web_server.PREFERRED_PORT)
+    
+    if args.dynamic_port or preferred == 0:
+        port = web_server.find_free_port(0)
+        log_info(f"Dynamic Port Mode: OS assigned open port {BOLD}{port}{RESET}")
+    elif is_port_in_use(preferred):
+        log_warn(f"Default port {preferred} is currently in use. Dynamically searching for an open port...")
+        port = web_server.find_free_port(preferred)
+        log_ok(f"Dynamically bound to available port: {BOLD}{port}{RESET}")
+    else:
+        port = preferred
+        log_ok(f"Network Port: {BOLD}{port}{RESET} (open and ready)")
+
+    web_server.PORT = port
+    app_url = f"http://127.0.0.1:{port}/"
+
+    if args.check_only:
+        print(f"\nAll pre-flight checks completed. App will bind to {app_url}")
+        sys.exit(0)
 
     output_dir = engine.output_directory()
     log_ok(f"Download Directory: {output_dir}")
@@ -237,11 +264,6 @@ def main():
     print("-" * 55)
     log_info("Starting Backend Server (Flask REST API + spotDL worker pool)...")
     log_info("Preparing Frontend Web Interface (HTML5 / Vanilla CSS / JS)...")
-
-    # Determine free port and prepare URL
-    port = web_server.find_free_port(web_server.PREFERRED_PORT)
-    web_server.PORT = port
-    app_url = f"http://127.0.0.1:{port}/"
 
     print(f"\n {GREEN}{BOLD}>>> SpotiDown is LIVE! <<<{RESET}")
     print(f" {BOLD}Frontend Interface:{RESET} {CYAN}{app_url}{RESET}")

@@ -196,20 +196,33 @@ def open_folder():
     return jsonify({"path": folder})
 
 
-def find_free_port(preferred):
-    for port in range(preferred, preferred + 20):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-            try:
-                probe.bind(("127.0.0.1", port))
-            except OSError:
-                continue
-            return port
-    raise OSError(f"No free port found between {preferred} and {preferred + 19}.")
+def find_free_port(preferred=PREFERRED_PORT, max_tries=100):
+    """Find an available port dynamically.
+    
+    1. If a preferred port is specified (> 0), checks it and adjacent ports.
+    2. If all scanned ports are busy, or if preferred is 0, asks the OS
+       kernel to dynamically allocate a guaranteed free ephemeral port.
+    """
+    if preferred and preferred > 0:
+        for port in range(preferred, preferred + max_tries):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                try:
+                    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    probe.bind(("127.0.0.1", port))
+                    return port
+                except OSError:
+                    continue
+
+    # Dynamically request an open port from the operating system kernel
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
 
 
-def run_server(open_browser=True):
+def run_server(open_browser=True, port=None):
     global PORT
-    PORT = find_free_port(PREFERRED_PORT)
+    target_port = port if port is not None else PREFERRED_PORT
+    PORT = find_free_port(target_port)
     url = f"http://127.0.0.1:{PORT}/"
     print(f"Spotify Downloader is running at {url}  (press Ctrl+C to stop)")
     if open_browser:

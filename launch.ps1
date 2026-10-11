@@ -10,6 +10,7 @@ param(
     [switch]$NoBrowser,
     [switch]$CheckOnly,
     [switch]$AutoInstall,
+    [switch]$DynamicPort,
     [int]$Port
 )
 
@@ -20,6 +21,7 @@ $argsList = @("launcher.py")
 if ($NoBrowser)   { $argsList += "--no-browser" }
 if ($CheckOnly)   { $argsList += "--check-only" }
 if ($AutoInstall) { $argsList += "--auto-install" }
+if ($DynamicPort) { $argsList += "--dynamic-port" }
 if ($Port)        { $argsList += "--port", $Port }
 
 # Try py -3.12, py -3, or python
