@@ -16,6 +16,9 @@ A Spotify playlist and track downloader powered by `spotDL` with a modern web in
   - `Song - Artist`
   - `Song only`
   - `Numbered (playlist order)`
+- **Metadata First**: Reads the whole playlist and lists every track to be downloaded before any audio is fetched.
+- **Cross-Platform Fallback**: If a track cannot be matched on one platform it is searched on the next (YouTube → SoundCloud → Bandcamp → Piped) using the same Spotify metadata, then retried once more on a broader search.
+- **Failure Reporting**: Tracks that no platform could match are logged and written to `failed_tracks.txt` in the output folder.
 - **Robust Queue & Process Control**: Automatic retries, stall detection, and cancel support.
 - **Standalone Packaging**: PyInstaller spec provided for single-executable builds.
 

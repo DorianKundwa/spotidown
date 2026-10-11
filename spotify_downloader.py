@@ -3,6 +3,11 @@
 This module is the download engine: dependency setup, spotDL process control and
 progress parsing. web_server.py provides the local browser UI and JSON API on top of it.
 
+The job runs in three phases:
+  1. Metadata  - read the playlist and fetch every track's metadata up front.
+  2. Download  - fetch the audio, searching each configured platform per track.
+  3. Fallback  - re-search any track no platform matched, using the saved metadata.
+
 Run with:  python spotify_downloader.py   (Python 3.10 or newer)
 """
 
@@ -15,7 +20,6 @@ import subprocess
 import sys
 import threading
 import time
-from collections import Counter
 
 OUTPUT_FOLDER_NAME = "Spotify_Liked_Songs_MP3"
 MIN_PYTHON = (3, 10)          # spotDL's audio providers fail on Python 3.9
@@ -25,6 +29,19 @@ METADATA_TIMEOUT_SECONDS = 3600  # big playlists can take a long time before spo
 MAX_ATTEMPTS = 5              # consecutive spotDL runs that record no new track before giving up
 RETRY_DELAY_SECONDS = 5
 PARALLEL_DOWNLOADS = 4        # simultaneous tracks, passed to spotDL --threads
+# Audio platforms to try for every track, in fallback order. spotDL asks each
+# provider in turn and downloads from the first one that has a match, so a song
+# missing from YouTube is searched on SoundCloud, then Bandcamp, then Piped using the
+# Spotify metadata we already hold (title, artists and ISRC when present).
+# 'youtube-music' is intentionally left out: spotDL aborts the whole run with a hard
+# error whenever YouTube Music is unreachable from the user's network.
+AUDIO_PROVIDERS = ("youtube", "soundcloud", "bandcamp", "piped")
+# Order used for the second pass over whatever the first pass could not download.
+FALLBACK_PROVIDERS = ("soundcloud", "bandcamp", "piped", "youtube")
+METADATA_FILENAME = "playlist_metadata.spotdl"   # all tracks, fetched before downloading
+RETRY_FILENAME = "fallback_playlist.spotdl"      # tracks the first pass could not match
+SPOTDL_ERRORS_FILENAME = "spotdl_errors.txt"     # raw spotDL failures (URL + reason)
+RETRY_ERRORS_FILENAME = "fallback_errors.txt"    # failures still left after the fallback pass
 # UI label -> (spotDL --format, spotDL --bitrate)
 AUDIO_FORMATS = {
     "MP3 320 kbps": ("mp3", "320k"),
@@ -58,6 +75,7 @@ FOUND_PATTERN = re.compile(r"Found (\d+) songs? in ")
 PROGRESS_PATTERN = re.compile(r"(\d+)/(\d+) complete")
 DOWNLOADED_PATTERN = re.compile(r'Downloaded "(?P<name>.+?)":')
 SKIPPED_PATTERN = re.compile(r"Skipping (?P<name>.+?) \((?:file already exists|skip file found)\)")
+NO_MATCH_PATTERN = re.compile(r"No results found for song:\s*(?P<name>.+?)\s*$")
 FAILED_PATTERN = re.compile(r"LookupError|\bError\b|\bFailed\b")
 SPOTDL_CHILD_FLAG = "--run-spotdl"  # frozen exe re-launches itself with this flag to run spotDL
 NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0  # no console flashes from the GUI
@@ -105,6 +123,12 @@ class DownloadProgress:
         skipped = SKIPPED_PATTERN.search(line)
         if skipped:
             self.record(skipped.group("name"), "skipped")
+            return True
+        no_match = NO_MATCH_PATTERN.search(line)
+        if no_match:
+            # 'No results found for song: <name>' -> record against the track itself, so a
+            # later success on another platform replaces this entry instead of adding a new one.
+            self.record(no_match.group("name"), "failed")
             return True
         if FAILED_PATTERN.search(line):
             self.record(line, "failed")
@@ -238,6 +262,8 @@ def stop_process(proc):
 def run_spotdl(args, cwd, progress, cancel_event, log):
     """Run spotDL once and stream its output.
 
+    progress may be a DownloadProgress (download passes) or None (the metadata pass,
+    which only needs its output relayed to the log).
     Returns (exit_code, outcome) where outcome is "finished", "stalled", "cancelled" or "error".
     """
     env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
@@ -286,42 +312,120 @@ def run_spotdl(args, cwd, progress, cancel_event, log):
         if line is None:
             break
         last_output = time.monotonic()
-        if progress.handle_line(line):
+        if progress is not None:
+            if progress.handle_line(line):
+                tracks_reported = True
+        elif line.strip():
+            # The metadata pass has no counter; any output means spotDL is still alive.
             tracks_reported = True
     return proc.wait(), "finished"
 
 
-def print_summary(progress, output_dir, log):
-    """Log totals and save failed track names to failed_tracks.txt."""
+def print_summary(progress, output_dir, log, total=None, failed_names=None):
+    """Log totals and save failed track names to failed_tracks.txt.
+
+    When failed_names is given the summary is driven by the track list we fetched from
+    Spotify rather than the streamed output, so it stays correct after the fallback pass
+    (spotDL also prints raw error lines, which are not real track entries).
+    """
     log("-" * 60)
-    if not progress.results:
+    if failed_names is None and not progress.results:
         log("[!] spotDL reported no tracks. Check the link and your internet connection.")
         return
-    counts = Counter(progress.results.values())
-    log(
-        f"Downloaded: {counts['downloaded']:,} | Already present: {counts['skipped']:,} "
-        f"| Failed: {counts['failed']:,}"
-    )
-    if counts["failed"]:
+    skipped = sum(1 for status in progress.results.values() if status == "skipped")
+    if failed_names is None:
         failed_names = [name for name, status in progress.results.items() if status == "failed"]
+        downloaded = sum(1 for status in progress.results.values() if status == "downloaded")
+    else:
+        downloaded = max(0, (total or 0) - skipped - len(failed_names))
+    log(
+        f"Downloaded: {downloaded:,} | Already present: {skipped:,} "
+        f"| Failed: {len(failed_names):,}"
+    )
+    if failed_names:
         log_path = os.path.join(output_dir, "failed_tracks.txt")
         try:
             with open(log_path, "w", encoding="utf-8") as handle:
                 handle.write("\n".join(failed_names) + "\n")
-            log(f"Failed track details saved to: {log_path}")
+            log(f"Failed track list saved to: {log_path}")
         except OSError as exc:
             log(f"[!] Could not save failed track list: {exc}")
 
 
-def download_playlist(playlist_url, output_dir, format_label, template_label, log, on_progress, cancel_event):
-    """Download the playlist into output_dir, retrying if spotDL fails or stalls. Returns True on success."""
+# ------------------------------------------------------------ pipeline steps
+
+def song_label(song):
+    """Return 'Artist - Title' for a saved metadata entry."""
+    artists = song.get("artists") or []
+    if not artists and song.get("artist"):
+        artists = [song["artist"]]
+    artist = ", ".join(name for name in artists if name) or "Unknown artist"
+    return f"{artist} - {song.get('name') or 'Unknown title'}"
+
+
+def audio_args(providers):
+    """spotDL takes one --audio flag followed by every provider it may use, in order."""
+    return ["--audio", *providers]
+
+
+def load_metadata_songs(metadata_path):
+    """Read the .spotdl file written by 'spotdl save'. Returns a list of dicts or None."""
+    try:
+        with open(metadata_path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, list):
+        return None
+    return [entry for entry in data if isinstance(entry, dict)]
+
+
+def fetch_metadata(playlist_url, metadata_path, log, cancel_event):
+    """Fetch every track's metadata for the playlist into metadata_path.
+
+    Returns the list of song dicts, or None when the metadata could not be read.
+    """
+    try:
+        os.remove(metadata_path)
+    except OSError:
+        pass
+    command = spotdl_command(
+        "save", playlist_url,
+        "--save-file", metadata_path,
+        *audio_args(AUDIO_PROVIDERS),
+        "--lyrics",  # empty value: skip the per-track lyrics lookup for this pass
+        "--threads", str(PARALLEL_DOWNLOADS),
+        "--simple-tui",
+    )
+    cwd = os.path.dirname(os.path.abspath(metadata_path)) or "."
+    _, outcome = run_spotdl(command, cwd, None, cancel_event, log)
+    if outcome == "cancelled":
+        return None
+    return load_metadata_songs(metadata_path)
+
+
+def read_failed_urls(errors_path):
+    """Collect the track URLs spotDL reported as failed in its --save-errors file."""
+    urls = set()
+    try:
+        with open(errors_path, encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if line.startswith("http") and " - " in line:
+                    urls.add(line.split(" - ", 1)[0].strip())
+    except OSError:
+        pass
+    return urls
+
+
+def build_download_args(source, format_label, template_label, providers, errors_path=None, dont_filter=False):
+    """Build a 'spotdl download' command for a playlist URL or a .spotdl metadata file."""
     audio_format, bitrate = AUDIO_FORMATS[format_label]
     name_template = FILENAME_TEMPLATES[template_label]
-    progress = DownloadProgress(log, on_progress)
     command = spotdl_command(
-        "download", playlist_url,
+        "download", source,
+        *audio_args(providers),
         "--format", audio_format,
-        "--audio", "youtube",  # YouTube Music returned no results in testing; plain YouTube works
         "--bitrate", bitrate,
         "--output", name_template + ".{output-ext}",
         "--threads", str(PARALLEL_DOWNLOADS),
@@ -329,8 +433,15 @@ def download_playlist(playlist_url, output_dir, format_label, template_label, lo
         "--max-retries", str(MAX_RETRIES_PER_TRACK),
         "--simple-tui",
     )
-    log(f"Saving to: {output_dir}")
-    success = False
+    if errors_path:
+        command += ["--save-errors", errors_path]
+    if dont_filter:
+        command += ["--dont-filter-results"]  # looser match for the fallback pass
+    return command
+
+
+def run_with_retries(command, output_dir, progress, cancel_event, log):
+    """Run spotDL, retrying while it fails or stalls. Returns True when a run exits cleanly."""
     run_number = 0
     idle_runs = 0  # runs in a row that recorded no new track
     while True:
@@ -339,28 +450,117 @@ def download_playlist(playlist_url, output_dir, format_label, template_label, lo
         exit_code, outcome = run_spotdl(command, output_dir, progress, cancel_event, log)
         if outcome == "cancelled":
             log("[!] Stopped by user.")
-            break
+            return False
         if outcome == "finished" and exit_code == 0:
-            log("[OK] Playlist processed.")
-            success = True
-            break
+            return True
         # Big playlists can stall many times while still making progress, so only idle runs count against the limit.
         idle_runs = 0 if len(progress.results) > tracks_before else idle_runs + 1
         reason = "stalled" if outcome == "stalled" else f"failed (exit code {exit_code})"
         if idle_runs >= MAX_ATTEMPTS:
             log(f"[X] spotDL {reason}. Giving up after {MAX_ATTEMPTS} runs with no new tracks.")
-            break
+            return False
         log(f"[!] spotDL {reason}. Retrying (run {run_number + 1}); finished tracks are skipped.")
         if cancel_event.wait(RETRY_DELAY_SECONDS):
             log("[!] Stopped by user.")
-            break
+            return False
 
-    print_summary(progress, output_dir, log)
-    return success
+
+def retry_failed_songs(songs, failed_urls, output_dir, format_label, template_label, progress, cancel_event, log, errors_path):
+    """Re-search the tracks no platform matched, using their saved metadata, on the others."""
+    retry_songs = [song for song in songs if song.get("url") in failed_urls]
+    if not retry_songs:
+        return False
+    retry_path = os.path.join(output_dir, RETRY_FILENAME)
+    try:
+        with open(retry_path, "w", encoding="utf-8") as handle:
+            json.dump(retry_songs, handle, indent=2, ensure_ascii=False)
+    except OSError as exc:
+        log(f"[!] Could not write the fallback metadata file: {exc}")
+        return False
+    log("-" * 60)
+    log(f"[*] Fallback: re-searching {len(retry_songs)} failed track(s) on "
+        f"{' -> '.join(FALLBACK_PROVIDERS)} using their metadata...")
+    command = build_download_args(
+        retry_path, format_label, template_label, FALLBACK_PROVIDERS,
+        errors_path=errors_path, dont_filter=True)
+    return run_with_retries(command, output_dir, progress, cancel_event, log)
+
+
+def process_playlist(playlist_url, output_dir, format_label, template_label, log, on_progress, cancel_event):
+    """Fetch all metadata, download with a per-track platform fallback, then retry failures."""
+    log(f"Saving to: {output_dir}")
+    metadata_path = os.path.join(output_dir, METADATA_FILENAME)
+    errors_path = os.path.join(output_dir, SPOTDL_ERRORS_FILENAME)
+    retry_errors_path = os.path.join(output_dir, RETRY_ERRORS_FILENAME)
+    for stale in (errors_path, retry_errors_path):
+        try:
+            os.remove(stale)
+        except OSError:
+            pass
+
+    # 1. Metadata: read the playlist and resolve every track before downloading anything.
+    log("-" * 60)
+    log("[*] Step 1/3: Fetching metadata for every track in the playlist...")
+    songs = fetch_metadata(playlist_url, metadata_path, log, cancel_event)
+    progress = DownloadProgress(log, on_progress)
+    if cancel_event.is_set():
+        log("[!] Stopped by user.")
+        return False
+
+    source = playlist_url
+    total = None
+    if songs:
+        total = len(songs)
+        source = metadata_path  # download the resolved track list, not the raw link
+        progress.set_total(total)
+        log(f"[OK] {total} track(s) to download:")
+        for index, song in enumerate(songs, 1):
+            log(f"      {index:>5}. {song_label(song)}")
+    else:
+        log("[!] Could not read the track metadata for this link.")
+        log("[*] Falling back to the playlist link directly; tracks are still matched per platform.")
+
+    # 2. Download: spotDL searches the platforms in order for every track.
+    log("-" * 60)
+    log(f"[*] Step 2/3: Downloading with per-track fallback ({' -> '.join(AUDIO_PROVIDERS)})...")
+    command = build_download_args(source, format_label, template_label, AUDIO_PROVIDERS, errors_path)
+    ran_cleanly = run_with_retries(command, output_dir, progress, cancel_event, log)
+    if cancel_event.is_set():
+        log("[!] Stopped by user.")
+        print_summary(progress, output_dir, log, total=total)
+        return False
+
+    # 3. Fallback: whatever no platform matched is re-searched on the others.
+    if songs:
+        failed_urls = read_failed_urls(errors_path)
+        failed_names = []
+        if failed_urls:
+            failed_songs = [song for song in songs if song.get("url") in failed_urls]
+            log("-" * 60)
+            log(f"[!] {len(failed_songs)} track(s) were not found on the first pass:")
+            for song in failed_songs:
+                log(f"[X]       {song_label(song)}")
+            retried = retry_failed_songs(
+                songs, failed_urls, output_dir, format_label, template_label,
+                progress, cancel_event, log, retry_errors_path)
+            if retried or os.path.exists(retry_errors_path):
+                still_failed = read_failed_urls(retry_errors_path)
+            else:
+                # The fallback could not run at all; the original failures still stand.
+                still_failed = failed_urls
+            failed_names = [song_label(song) for song in songs if song.get("url") in still_failed]
+        else:
+            log("-" * 60)
+            log("[OK] Every requested track was matched by a platform.")
+        print_summary(progress, output_dir, log, total=total, failed_names=failed_names)
+        return not failed_names
+
+    print_summary(progress, output_dir, log, total=total)
+    return ran_cleanly
 
 
 def run_download_job(playlist_url, output_dir, format_label, template_label, log, on_progress, cancel_event):
-    """Full backend job: check Python, set up dependencies, then download. Returns True on success."""
+    """Full backend job: check Python, set up dependencies, then run the pipeline. Returns True on success."""
     if sys.version_info < MIN_PYTHON:
         log(f"[X] Python {sys.version.split()[0]} is too old. spotDL needs Python 3.10 or newer.")
         return False
@@ -372,7 +572,7 @@ def run_download_job(playlist_url, output_dir, format_label, template_label, log
     except OSError as exc:
         log(f"[X] Could not create folder {output_dir}: {exc}")
         return False
-    return download_playlist(
+    return process_playlist(
         playlist_url, output_dir, format_label, template_label, log, on_progress, cancel_event)
 
 
